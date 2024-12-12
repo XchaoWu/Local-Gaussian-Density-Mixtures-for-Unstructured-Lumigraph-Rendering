@@ -37,6 +37,8 @@ We use the code from [LLFF](https://github.com/Fyusion/LLFF) to run colmap for e
 
 
 ## RUN
+Set `DATA_DIR` in `config/default.yaml` to your own data directory.
+
 Modify the code in `run.sh`.
 ```
 python train.py <GPU IDX> config/default.yaml <DATA NAME> <LOG NAME>
