@@ -35,6 +35,8 @@ bash camera_est.sh <DATA DIR>
 ```
 We use the code from [LLFF](https://github.com/Fyusion/LLFF) to run colmap for estimating camera poses.
 
+*PS: It would be better if you do undistortion after camera pose estimation.*
+
 
 ## RUN
 Set `DATA_DIR` in `config/default.yaml` to your own data directory.
