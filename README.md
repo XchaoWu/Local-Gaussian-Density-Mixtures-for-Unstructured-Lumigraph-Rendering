@@ -1,4 +1,4 @@
-# Local Gaussian Density Mixtures for Unstructured Lumigraph Rendering
+# Local Gaussian Density Mixtures (LGDM) for Unstructured Lumigraph Rendering
 
 Xiuchao Wu, Jiamin Xu, Chi Wang, Yifan Peng, Qixing Huang, James Tompkin, Weiwei Xu
 
@@ -35,7 +35,7 @@ bash camera_est.sh <DATA DIR>
 ```
 We use the code from [LLFF](https://github.com/Fyusion/LLFF) to run colmap for estimating camera poses.
 
-*PS: It would be better if you do undistortion after camera pose estimation.*
+*It would be better if you do undistortion after camera pose estimation.*
 
 
 ## RUN
