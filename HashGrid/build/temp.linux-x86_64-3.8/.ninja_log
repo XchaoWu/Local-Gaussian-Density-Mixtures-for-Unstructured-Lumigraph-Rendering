@@ -1,0 +1,13 @@
+# ninja log v5
+8	777	1723258684753247991	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/rendering/rayblocktracing_kernel.o	6e8c474bda7749b8
+9	792	1723258684757248002	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/rendering/renderbase_outdoor_kernel.o	4fbe1c002ee1f332
+12	802	1723258684769248036	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/rendering/renderbase_outdoor_v1_kernel.o	25ac1f6288d8c0df
+7	803	1723258684769248036	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/rendering/rayblocksampling_kernel.o	7c14cb7d700c00d9
+0	19722	1723258703689299841	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/binding.o	672374c5b78fe15d
+6	35414	1723258719385340611	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/hashgrid_kernel.o	8aa8c87c611cc46f
+15	35673	1723258719649341280	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/sampler_kernel.o	b75b7bfd90d2b876
+0	35817	1723258719793341645	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/hashgrid_2d_kernel copy.o	1ea03a33cfc8f129
+4	35990	1723258719961342070	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/hashgrid_2d_kernel.o	529bce90accc7653
+6	36431	1723258720401343182	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/hashgrid_bg_kernel.o	52748865d82a5929
+8	36581	1723258720553343566	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/rendering/renderbase_kernel.o	e89c1122b5b7aeaa
+12	178589	1723258862545629972	/data/wxc/sig24/LGDM/HashGrid/build/temp.linux-x86_64-3.8/src/rendering_kernel.o	529e821781ac005c

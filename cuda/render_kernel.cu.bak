@@ -1,0 +1,629 @@
+#include "render.h"
+#include "macros.h"
+#include "cutil_math.h"
+#include "cuda_utils.h"
+#include <ATen/ATen.h>
+#include <stdint.h>
+#include <ATen/TensorAccessor.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAUtils.h>
+#include <iostream>
+#include <stdio.h>
+#include <math.h>
+#include "cuda_fp16.h"
+#include <torch/extension.h>
+#include "interpolation.h"
+#include "dda.h"
+#include "grid.h"
+#include "camera.h"
+#include <thrust/sort.h>
+#include <thrust/execution_policy.h>
+#define PI 3.1415926
+#define HIDEN_WIDTH 32
+#define PARAMSIZE 2417
+#define NUM_GAUSSIAN 10
+#define NUM_NEIGHBOR 8
+
+#define INV_SQRT2 1.0f / sqrtf(2.0f)
+#define INV_SQRT2PI 1.0f / sqrtf(2.0f * PI)
+
+
+__global__ 
+void ray_cast_kernel(
+    PinholeCameraManager cams, 
+    float3* rays_o, // B x 3
+    float3* rays_d, // B x 3 
+    float3* up_axis,
+    int height, int width)
+{
+    int taskIdx = threadIdx.x + blockIdx.x * blockDim.x;
+    int total_thread = blockDim.x * gridDim.x; 
+    while(taskIdx < height*width)
+    {
+        float2 uv = make_float2((float)(taskIdx % width) + 0.5f, 
+                                (float)(taskIdx / width) + 0.5f);
+
+        PinholeCamera cam = cams[0];
+        float3 x_world = cam.pixel2world(uv, 1.0f);
+
+        float3 origin = cam.camera_center();
+
+        rays_o[taskIdx] = origin;
+        rays_d[taskIdx] = x_world - origin;
+        up_axis[taskIdx] = make_float3(cam.E.data[4], cam.E.data[5], cam.E.data[6]);
+
+        taskIdx += total_thread;
+    }
+}
+
+
+void ray_cast_cuda(
+    at::Tensor rt, at::Tensor k, 
+    at::Tensor &rays_o, at::Tensor &rays_d,
+    at::Tensor &up_axis, 
+    int height, int width)
+{
+    // PinholeCamera cam(Intrinsic(k.contiguous().data_ptr<float>()),
+    //                   Extrinsic(c2w.contiguous().data_ptr<float>()));
+    // PinholeCamera cam(k.contiguous().data_ptr<float>(), 
+                    //   c2w.contiguous().data_ptr<float>());
+
+    PinholeCameraManager cameras((Intrinsic*)k.contiguous().data_ptr<float>(), 
+                                (Extrinsic*)rt.contiguous().data_ptr<float>(), 1);
+
+    ray_cast_kernel<<<NUM_BLOCK(height*width), NUM_THREAD>>>(
+        cameras, (float3*)rays_o.contiguous().data_ptr<float>(),
+        (float3*)rays_d.contiguous().data_ptr<float>(),
+        (float3*)up_axis.contiguous().data_ptr<float>(),
+        height, width);
+
+
+    AT_CUDA_CHECK(cudaGetLastError());
+    return;
+
+}
+
+
+__device__ 
+inline float3 fetch_color(uint8_t* src, float2 uv, int height, int width,
+              bool &valid)
+{
+
+    float3 color = make_float3(0.0f, 0.0f, 0.0f);
+
+    if (uv.x < 0 || uv.x >= width || uv.y < 0 || uv.y >= height)
+    {
+        valid = false;
+        return color;
+    }
+
+    valid = true;
+
+    // 实现0.5,0.5像素中心版本的双线性插值 
+    float total_weight = 0.0f; 
+    
+
+    uv.x = uv.x - 0.5f;
+    uv.y = uv.y - 0.5f;
+    int u = (int)floorf(uv.x);
+    int v = (int)floorf(uv.y);
+
+    float2 w_base = make_float2(uv.x - u, uv.y - v);
+    float w[4] = {  
+        (1.0f - w_base.x) * (1.0f - w_base.y),
+        (1.0f - w_base.x) * w_base.y,
+        w_base.x * (1.0f - w_base.y),
+        w_base.x * w_base.y};
+
+    #pragma unroll
+    for(int i=0; i<2; i++)
+    {
+        #pragma unroll
+        for(int j=0; j<2; j++)
+        {
+            int x = u + i;
+            int y = v + j;
+            if (x < 0 || y < 0 || x >= width || y >= height) continue;
+
+            float weight = w[i*2+j];
+            total_weight += weight;
+            int idx = y * width + x;
+            color.x += weight * (float)src[idx * 3 + 0];
+            color.y += weight * (float)src[idx * 3 + 1];
+            color.z += weight * (float)src[idx * 3 + 2];
+        }
+    }
+
+    if (total_weight > 0.0f)
+    {
+        color = color / total_weight;
+    }
+    return color;
+}
+
+__device__ inline
+float gaussian(float z, float mu, float inv_sigma)
+{   
+    float item = (z - mu) * inv_sigma;
+    return inv_sigma * INV_SQRT2PI * expf(-0.5f * item * item);
+}
+
+__device__ inline 
+float integrated_gaussian_func(float z, float mu, float inv_sigma, float near)
+{
+    // float item1 = 0.5 * erff(inv_sigma * (z - mu) / SQRT2) + 0.5f;
+    // float item2 = 0.5 * erff(inv_sigma * (near - mu) / SQRT2) + 0.5f;
+    // return fmaxf(item1 - item2, 0.0f);
+
+    float item1 = inv_sigma * INV_SQRT2;
+    float item2 = item1 * mu;
+    return fmaxf(0.5f * (erff(item1 * z - item2) - erff(item1 * near - item2)), 0.0f);
+    
+}
+
+// [TODO] unroll with fixed num_gaussian
+__global__ 
+void inference_neighbor_kernel(
+    float3* samples, // B x num_sample x 3 
+    half* src_views, // num_view x H x W * (3*num_gaussian)
+    uint8_t* src_images, // num_view x H x W * 3
+    int* nei_idxs, // B x num_neighbor x 1 
+    float* proj_mat, // num_view x 3 x 4 
+    float3* nei_centers, // num_view x 3 
+    float* blend_alpha, // B x num_sample x 1
+    float near, float far,
+    int num_sample,
+    int num_view,
+    int height, int width,
+    int batch_size)
+{
+    int taskIdx = threadIdx.x + blockIdx.x * blockDim.x;
+    int total_thread = blockDim.x * gridDim.x; 
+
+    extern __shared__ float proj_mat_shared[];
+
+    int load_idx = threadIdx.x;
+    while (load_idx < num_view*12) {
+        proj_mat_shared[load_idx] = proj_mat[load_idx];
+        load_idx += blockDim.x;
+    }
+    __syncthreads();
+
+    while(taskIdx < batch_size*num_sample)
+    {
+        int batch_idx = taskIdx / num_sample;
+        int point_idx = taskIdx % num_sample;
+
+
+        float3 x_world = samples[taskIdx];
+        int* cur_nei_idxs = nei_idxs + batch_idx * NUM_NEIGHBOR;
+        // int vidx = nei_idxs[batch_idx * num_neighbor + blockIdx.y];
+
+        float weight_geo = 0.0f;
+        float point_alpha = 0.0f;
+
+        #pragma unroll
+        for (int k=0; k<NUM_NEIGHBOR; k++)
+        {
+            int vidx = cur_nei_idxs[k];
+
+            if (vidx == -1) continue;
+
+            // PinholeCamera cam = cameras[vidx];
+            float* mat = proj_mat_shared + vidx * 12;
+            half* cur_src_view = src_views + vidx * height * width * 3 * NUM_GAUSSIAN;
+
+            float u = mat[0] * x_world.x + mat[1] * x_world.y + mat[2] * x_world.z + mat[3];
+            float v = mat[4] * x_world.x + mat[5] * x_world.y + mat[6] * x_world.z + mat[7];
+            float w = mat[8] * x_world.x + mat[9] * x_world.y + mat[10] * x_world.z + mat[11];
+
+            if (w <= 0) continue;
+
+            u = u / w;
+            v = v / w;
+            
+
+            uint8_t* cur_src_img = src_images + vidx * height * width * 3;
+            bool valid;
+            float3 warped_color = fetch_color(cur_src_img, make_float2(u,v), height, width, valid);
+
+            if (valid == false) continue;
+
+
+            float3 nei_c = nei_centers[vidx];
+
+            float z = norm(x_world - nei_c);
+
+            // printf("point_idx %d nei_idx %d uv %f %f bound %f %f\n", 
+            // point_idx, blockIdx.y, uv.x, uv.y, near, far);
+
+            float alpha = 0.0f;
+            float visibility = 0.0f;
+
+            half* para = cur_src_view + ((int)v * width + (int)u) * 3 * NUM_GAUSSIAN;
+
+            #pragma unroll
+            for (int i=0; i<NUM_GAUSSIAN; i++)
+            {
+                float mu = __half2float(para[i*3+0]);
+                float inv_sigma = __half2float(para[i*3+1]);
+                float weight = __half2float(para[i*3+2]);
+
+                alpha += weight * gaussian(z, mu, inv_sigma);
+                visibility += weight * integrated_gaussian_func(z, mu, inv_sigma, near);
+            }
+            visibility = expf(-1.0f * visibility);
+
+            point_alpha += alpha * visibility;
+            weight_geo += visibility;
+
+        }
+
+        blend_alpha[taskIdx] = point_alpha / (weight_geo + 1e-8);
+
+
+        taskIdx += total_thread;
+        continue;
+    }
+}
+
+
+
+void inference_neighbor_cuda(
+    at::Tensor samples, 
+    at::Tensor src_views,
+    at::Tensor src_images,
+    at::Tensor nei_idxs,
+    at::Tensor proj_mat, at::Tensor nei_centers,
+    at::Tensor blend_alpha, 
+    float near, float far)
+{
+    int batch_size = blend_alpha.size(0);
+    int num_sample = blend_alpha.size(1);
+    int num_view = proj_mat.size(0);
+    int height = src_images.size(1);
+    int width = src_images.size(2);
+
+    // int num_gaussian = src_views.size(3) / 3;
+
+    // printf("batch_size %d num_sample %d num_neighbor %d num_view %d height %d width %d num_gaussian %d\n",
+    // batch_size, num_sample, num_neighbor, num_view, height, width, num_gaussian);
+
+    // int num_thread = 1024;
+    // dim3 n_blocks = dim3(min(65535, (batch_size*num_sample + num_thread - 1) / num_thread), num_neighbor);
+
+    // cudaMemcpyToSymbol(AABB_center.x, bbox_center.contiguous().data_ptr<float>(), sizeof(float)*3, 0, cudaMemcpyDeviceToDevice);
+    // cudaMemcpyToSymbol(AABB_size.x, bbox_size.contiguous().data_ptr<float>(), sizeof(float)*3, 0, cudaMemcpyDeviceToDevice);
+
+    inference_neighbor_kernel<<<NUM_BLOCK(batch_size*num_sample), NUM_THREAD, num_view * 12 * sizeof(float)>>>(
+        (float3*)samples.contiguous().data_ptr<float>(),
+        (half*)src_views.contiguous().data_ptr<at::Half>(),
+        (uint8_t*)src_images.contiguous().data_ptr<uint8_t>(),
+        (int*)nei_idxs.contiguous().data_ptr<int>(),
+        (float*)proj_mat.contiguous().data_ptr<float>(),
+        (float3*)nei_centers.contiguous().data_ptr<float>(),
+        (float*)blend_alpha.contiguous().data_ptr<float>(),
+        near, far, num_sample, num_view,
+        height, width, batch_size);
+
+
+    AT_CUDA_CHECK(cudaGetLastError());
+    return;
+
+}
+
+
+__global__ 
+void accumulate_kernel(
+    float* alpha, // B x num_sample x 1
+    float* T, // B x 1
+    float* weight, // B x num_sample x 1
+    int num_sample,
+    int batch_size)
+{
+    int taskIdx = threadIdx.x + blockIdx.x * blockDim.x;
+    int total_thread = blockDim.x * gridDim.x; 
+    while(taskIdx < batch_size)
+    {
+        float* cur_alpha = alpha + taskIdx * num_sample;
+        float* cur_weight = weight + taskIdx * num_sample;
+
+        float transparency = T[taskIdx];
+        for (int i=0; i<num_sample; i++)
+        {
+            float a = cur_alpha[i];
+            cur_weight[i] = transparency * a;
+
+            transparency = transparency * (1 - a);
+        }
+        T[taskIdx] = transparency;
+        
+        taskIdx += total_thread;
+    }
+}
+
+void accumulate_cuda(
+    at::Tensor alpha, at::Tensor T,
+    at::Tensor weight)
+{
+    int batch_size = alpha.size(0);
+    int num_sample = alpha.size(1);
+    accumulate_kernel<<<NUM_BLOCK(batch_size), NUM_THREAD>>>(
+        (float*)alpha.contiguous().data_ptr<float>(),
+        (float*)T.contiguous().data_ptr<float>(),
+        (float*)weight.contiguous().data_ptr<float>(),
+        num_sample, batch_size);
+    AT_CUDA_CHECK(cudaGetLastError());
+    return;
+
+}
+
+template <uint32_t INPUT_DIM, uint32_t OUT_DIM, uint32_t OFFSET>
+__inline__ __device__ 
+void Linear(int &param_index, half* params, half* layer)
+{
+    #pragma unroll
+    for (int i=OFFSET; i<OFFSET+OUT_DIM; i++)
+    {
+        layer[i] = params[param_index++];
+    }
+
+    #pragma unroll
+    for (int i=HIDEN_WIDTH-OFFSET; i<HIDEN_WIDTH-OFFSET+INPUT_DIM; i++)
+    {
+        for (int j=OFFSET; j<OFFSET+OUT_DIM; j++)
+        {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+            layer[j] = __hfma(layer[i], params[param_index++], layer[j]);
+#else 
+#endif 
+        }
+    }
+}
+
+__global__ 
+void inference_coeffi_kernel(
+    float3* samples, // B x num_sample x 3
+    float3* nei_dirs, // B x num_sample x num_neighbor x 3
+    float* visibility, // B x num_sample x num_neighbor x 1
+    float* coeffi, // B x num_sample x num_neighbor x 1
+    half* network_params, 
+    int batch_size, int num_sample, int num_neighbor)
+{
+
+    __shared__ half network_cache[PARAMSIZE];
+
+    int load_idx = threadIdx.x;
+    while (load_idx < PARAMSIZE) {
+        network_cache[load_idx] = network_params[load_idx];
+        load_idx += blockDim.x;
+    }
+    __syncthreads();
+
+
+    half layer[HIDEN_WIDTH*2];
+
+    int taskIdx = threadIdx.x + blockIdx.x * blockDim.x;
+    int total_thread = blockDim.x * gridDim.x; 
+
+    while(taskIdx < batch_size*num_sample)
+    {
+        float3 point = samples[taskIdx];
+        float3 direction = nei_dirs[taskIdx * num_neighbor + blockIdx.y];
+        float vis = visibility[taskIdx * num_neighbor + blockIdx.y];
+
+        layer[0] = __float2half(point.x);
+        layer[1] = __float2half(point.y);
+        layer[2] = __float2half(point.z);
+
+        int param_index = 0;
+        Linear<3, HIDEN_WIDTH, HIDEN_WIDTH>(param_index, network_cache, layer);
+        Linear<HIDEN_WIDTH, HIDEN_WIDTH, 0>(param_index, network_cache, layer);
+        Linear<HIDEN_WIDTH, 16, HIDEN_WIDTH>(param_index, network_cache, layer);
+
+        layer[HIDEN_WIDTH+16+0] = __float2half(direction.x);
+        layer[HIDEN_WIDTH+16+1] = __float2half(direction.y);
+        layer[HIDEN_WIDTH+16+2] = __float2half(direction.z);
+        layer[HIDEN_WIDTH+16+3] = __float2half(vis);
+
+
+        Linear<20, HIDEN_WIDTH, 0>(param_index, network_cache, layer);
+        Linear<HIDEN_WIDTH, 1, HIDEN_WIDTH>(param_index, network_cache, layer);
+
+
+        coeffi[taskIdx * num_neighbor + blockIdx.y] = 
+                    1.0f / (1.0f + expf(-1.0f * __half2float(layer[HIDEN_WIDTH])));
+
+        taskIdx += total_thread;
+        continue;
+    }
+}
+
+void inference_coeffi_cuda(
+    at::Tensor samples, at::Tensor nei_dirs,
+    at::Tensor visibility, at::Tensor coeffi,
+    at::Tensor network_params)
+{
+    int batch_size = nei_dirs.size(0);
+    int num_sample = nei_dirs.size(1);
+    int num_neighbor = nei_dirs.size(2);
+    
+    inference_coeffi_kernel<<<NUM_BLOCK(batch_size*num_sample), NUM_THREAD>>>(
+        (float3*)samples.contiguous().data_ptr<float>(),
+        (float3*)nei_dirs.contiguous().data_ptr<float>(),
+        (float*)visibility.contiguous().data_ptr<float>(),
+        (float*)coeffi.contiguous().data_ptr<float>(),
+        (half*)network_params.contiguous().data_ptr<at::Half>(),
+        batch_size, num_sample, num_neighbor);
+
+    AT_CUDA_CHECK(cudaGetLastError());
+    return;
+}
+
+// __global__ 
+// void blend_neighbor_kernel(
+//     float* alpha, // B x num_sample x num_neighbor x 1
+//     float* visibility, // B x num_sample x num_neighbor x 1
+//     float3* warped_color, // B x num_sample x num_neighbor x 3
+//     float3* blend_weight, // 
+//     float* blend_alpha, // B x num_sample x 1
+//     float3* blend_color, // B x num_sample x 3
+//     int batch_size, int num_sample,
+//     int num_neighbor)
+// {
+//     // inference network here  (Fully fused MLP)
+// }
+
+
+
+__global__ 
+void pixel_level_neighbor_ranking_kernel(
+    int* candidate_neighbors, // B x K 
+    float* proj_mat, // N x 3 x 4
+    float3* nei_cam_centers, // N x 3 
+    float3* rays_o, // B x 3 
+    float3* rays_d, // B x 3 
+    float* z_vals, // B x num_sample x 1  TODO z_vals
+    float3* up_axis, // B x 3
+    float* score, // B x K x 4 
+    int height, int width,
+    int num_candidate, // K
+    int num_sample,
+    int batch_size)
+{
+    int taskIdx = threadIdx.x + blockIdx.x * blockDim.x;
+    int total_thread = blockDim.x * gridDim.x; 
+    while(taskIdx < batch_size*num_sample)
+    {
+        int batch_idx = taskIdx / num_sample;
+        int point_idx = taskIdx % num_sample;
+
+        float3 origin = rays_o[batch_idx];
+        float3 direction = rays_d[batch_idx];
+        float z_depth = z_vals[taskIdx];
+        float3 x_world = origin + z_depth * direction;
+
+        int nei_idx = candidate_neighbors[batch_idx*num_candidate+blockIdx.y];
+
+
+        // PinholeCamera cam = cameras[nei_idx];
+        float* mat = proj_mat + nei_idx * 12;
+        
+    
+        float3 x_pixel = make_float3(dot(make_float3(mat[0], mat[1], mat[2]), x_world),
+                                   dot(make_float3(mat[4], mat[5], mat[6]), x_world),
+                                   dot(make_float3(mat[8], mat[9], mat[10]), x_world)) + 
+                         make_float3(mat[3], mat[7], mat[11]);
+
+
+        // if (batch_idx == 762047)
+        // {
+        //     // printf("vidx %d\n", vidx);
+        //     printf("point_idx %d nei_idx %d x_world %f %f %f x_pixel %f %f %f\nmat\n%f %f %f\n%f %f %f\n%f %f %f\n%f %f %f\n", point_idx, blockIdx.y,
+        //     x_world.x, x_world.y, x_world.z,
+        //     x_pixel.x, x_pixel.y, x_pixel.z,
+        //     mat[0], mat[1], mat[2],mat[4], mat[5], mat[6],mat[8], mat[9], mat[10], mat[3], mat[7], mat[11]);
+        // }
+
+        if (x_pixel.z <= 0)
+        {
+            taskIdx += total_thread;
+            continue;
+        }
+
+        float2 uv = make_float2(x_pixel.x / x_pixel.z, x_pixel.y / x_pixel.z);
+
+    //    if (batch_idx == 762047)
+    //     {
+    //         // printf("vidx %d\n", vidx);
+    //         printf("point_idx %d nei_idx %d x_world %f %f %f x_pixel %f %f %f uv %f %f\nmat\n%f %f %f\n%f %f %f\n%f %f %f\n%f %f %f\n", point_idx, blockIdx.y,
+    //         x_world.x, x_world.y, x_world.z,
+    //         x_pixel.x, x_pixel.y, x_pixel.z, uv.x, uv.y,
+    //         mat[0], mat[1], mat[2],mat[4], mat[5], mat[6],mat[8], mat[9], mat[10], mat[3], mat[7], mat[11]);
+    //     }
+
+        if (uv.x < 0 || uv.y < 0 || uv.x >= width || uv.y >= height)
+        {
+            taskIdx += total_thread;
+            continue;
+        }
+
+    //    if (batch_idx == 762047)
+    //     {
+    //         // printf("vidx %d\n", vidx);
+    //         printf("point_idx %d nei_idx %d x_world %f %f %f x_pixel %f %f %f uv %f %f\nmat\n%f %f %f\n%f %f %f\n%f %f %f\n%f %f %f\n", point_idx, blockIdx.y,
+    //         x_world.x, x_world.y, x_world.z,
+    //         x_pixel.x, x_pixel.y, x_pixel.z, uv.x, uv.y,
+    //         mat[0], mat[1], mat[2],mat[4], mat[5], mat[6],mat[8], mat[9], mat[10], mat[3], mat[7], mat[11]);
+    //     }
+
+        float3 camera_center = nei_cam_centers[nei_idx];
+
+        float3 up = up_axis[batch_idx];
+
+        float3 view_drection = normalize(camera_center - x_world);
+        float3 normal = normalize(origin - x_world);
+
+        float3 basis_a = normalize(cross(normal, up));
+        float3 basis_b = normalize(cross(normal, basis_a));
+
+        float coor_a = dot(view_drection, basis_a);
+        float coor_b = dot(view_drection, basis_b); 
+        float coor_c = dot(view_drection, normal);
+
+        int region = ((signf(coor_b) + 1) + (signf(coor_a) + 1) / 2);
+
+
+        // if (batch_idx == 762047)
+        // {
+
+        //     int loc = (batch_idx*num_candidate+blockIdx.y) * 4 + region;
+        //     printf("point_idx %d coor_a %f coor_b %f coor_c %f camera_center %f %f %f origin %f %f %f loc %d\n", 
+        //     point_idx, coor_a, coor_b, coor_c, camera_center.x, camera_center.y, camera_center.z,
+        //     origin.x, origin.y, origin.z, loc);
+        // }
+        // score[(batch_idx*num_candidate+blockIdx.y) * 4 + region] = coor_c;
+        // atomicAdd(score+(batch_idx*num_step*num_candidate+step_idx*num_candidate+blockIdx.y)*4+region, coor_c);
+        atomicAdd(score+(batch_idx*num_candidate+blockIdx.y) * 4 + region, coor_c);
+
+        taskIdx += total_thread;
+    }
+}
+
+
+void pixel_level_neighbor_ranking_render(
+    at::Tensor candidate_neighbors, 
+    at::Tensor proj_mat,
+    at::Tensor nei_cam_centers,
+    at::Tensor rays_o, at::Tensor rays_d, 
+    at::Tensor z_vals, 
+    at::Tensor up_axis,
+    at::Tensor score, int num_thread,
+    int height, int width)
+{
+    int batch_size = rays_o.size(0);
+    int num_sample = z_vals.size(1);
+    int num_camera = proj_mat.size(0);
+    int num_candidate = candidate_neighbors.size(1);
+
+    // PinholeCameraManager cameras((Intrinsic*)ks.contiguous().data_ptr<float>(), 
+    //                             (Extrinsic*)rts.contiguous().data_ptr<float>(), num_camera);
+
+    dim3 n_blocks = dim3(min(65535, (batch_size*num_sample + num_thread - 1) / num_thread), num_candidate);
+
+    pixel_level_neighbor_ranking_kernel<<<n_blocks, num_thread>>>(
+        (int*)candidate_neighbors.contiguous().data_ptr<int>(),
+        (float*)proj_mat.contiguous().data_ptr<float>(),
+        (float3*)nei_cam_centers.contiguous().data_ptr<float>(),
+        (float3*)rays_o.contiguous().data_ptr<float>(),
+        (float3*)rays_d.contiguous().data_ptr<float>(),
+        (float*)z_vals.contiguous().data_ptr<float>(),
+        (float3*)up_axis.contiguous().data_ptr<float>(),
+        (float*)score.contiguous().data_ptr<float>(),
+        height, width,
+        num_candidate, num_sample, batch_size);
+
+    AT_CUDA_CHECK(cudaGetLastError());
+    return;
+}

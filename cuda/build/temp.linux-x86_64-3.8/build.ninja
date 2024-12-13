@@ -1,0 +1,37 @@
+ninja_required_version = 1.3
+cxx = c++
+nvcc = /usr/local/cuda/bin/nvcc
+
+cflags = -pthread -B /home/amax/miniconda3/envs/tb3/compiler_compat -Wl,--sysroot=/ -Wsign-compare -DNDEBUG -g -fwrapv -O3 -Wall -Wstrict-prototypes -fPIC -I/data/wxc/sig24/LGDM/cuda/include -I/usr/local/include -I/home/amax/miniconda3/envs/tb3/lib/python3.8/site-packages/torch/include -I/home/amax/miniconda3/envs/tb3/lib/python3.8/site-packages/torch/include/torch/csrc/api/include -I/home/amax/miniconda3/envs/tb3/lib/python3.8/site-packages/torch/include/TH -I/home/amax/miniconda3/envs/tb3/lib/python3.8/site-packages/torch/include/THC -I/usr/local/cuda/include -I/home/amax/miniconda3/envs/tb3/include/python3.8 -c
+post_cflags = -g -O0 -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=CUDA_EXT -D_GLIBCXX_USE_CXX11_ABI=0 -std=c++14
+cuda_cflags = -I/data/wxc/sig24/LGDM/cuda/include -I/usr/local/include -I/home/amax/miniconda3/envs/tb3/lib/python3.8/site-packages/torch/include -I/home/amax/miniconda3/envs/tb3/lib/python3.8/site-packages/torch/include/torch/csrc/api/include -I/home/amax/miniconda3/envs/tb3/lib/python3.8/site-packages/torch/include/TH -I/home/amax/miniconda3/envs/tb3/lib/python3.8/site-packages/torch/include/THC -I/usr/local/cuda/include -I/home/amax/miniconda3/envs/tb3/include/python3.8 -c
+cuda_post_cflags = -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=CUDA_EXT -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_70,code=compute_70 -gencode=arch=compute_70,code=sm_70 -std=c++14
+ldflags = 
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags
+  depfile = $out.d
+  deps = gcc
+
+rule cuda_compile
+  depfile = $out.d
+  deps = gcc
+  command = $nvcc  $cuda_cflags -c $in -o $out $cuda_post_cflags
+
+
+
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/adam_kernel.o: cuda_compile /data/wxc/sig24/LGDM/cuda/adam_kernel.cu
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/binding.o: compile /data/wxc/sig24/LGDM/cuda/binding.cpp
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/build_blocks_kernel.o: cuda_compile /data/wxc/sig24/LGDM/cuda/build_blocks_kernel.cu
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/cnpy.o: compile /data/wxc/sig24/LGDM/cuda/cnpy.cpp
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/compute_ray_kernel.o: cuda_compile /data/wxc/sig24/LGDM/cuda/compute_ray_kernel.cu
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/grid_sample_kernel.o: cuda_compile /data/wxc/sig24/LGDM/cuda/grid_sample_kernel.cu
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/helper_kernel.o: cuda_compile /data/wxc/sig24/LGDM/cuda/helper_kernel.cu
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/render_kernel.o: cuda_compile /data/wxc/sig24/LGDM/cuda/render_kernel.cu
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/sample_kernel.o: cuda_compile /data/wxc/sig24/LGDM/cuda/sample_kernel.cu
+build /data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/view_selection_kernel.o: cuda_compile /data/wxc/sig24/LGDM/cuda/view_selection_kernel.cu
+
+
+
+
+

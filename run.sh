@@ -1,0 +1,1 @@
+python train.py 6 config/default.yaml cat TEST

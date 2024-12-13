@@ -1,0 +1,22 @@
+DATA_DIR: "/data/wxc/sig24/data/data/self_data"
+PREFIX: ""
+
+DATA_TYPE: 5
+
+NUM_NEIGHBOR: 8
+NUM_GAUSSIAN: 10
+
+TOTAL_STEP: 60000
+NUM_SAMPLE: 192 
+
+BATCH_SIZE: 2048
+
+FACTOR: 4
+
+ETA: [0.001, 0.0001]
+
+MAX_GRID_LOG2DIM: 9
+
+SSIM_SCIKIT: True
+
+INV_Z: True

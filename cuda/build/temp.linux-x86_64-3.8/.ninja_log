@@ -1,0 +1,11 @@
+# ninja log v5
+2	3014	1723258675205220709	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/cnpy.o	5d06f2a8caf4f46
+1	24177	1723258696353280105	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/binding.o	87b160d2bba96388
+6	36327	1723258708513312581	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/grid_sample_kernel.o	8e5ae712832731af
+5	36675	1723258708853313472	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/compute_ray_kernel.o	1a6df2e2847a31
+11	36681	1723258708861313493	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/sample_kernel.o	2d3c1ca356a8f282
+12	37145	1723258709329314717	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/view_selection_kernel.o	211712c3bfd52a45
+2	37458	1723258709633315512	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/build_blocks_kernel.o	b5558060308549b6
+0	37868	1723258710045316588	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/adam_kernel.o	f84fb44bdcee975c
+6	40182	1723258712361322610	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/helper_kernel.o	21e05e75d897aec7
+10	61899	1723258734077377017	/data/wxc/sig24/LGDM/cuda/build/temp.linux-x86_64-3.8/data/wxc/sig24/LGDM/cuda/render_kernel.o	d6c5f84bdc39ad32
